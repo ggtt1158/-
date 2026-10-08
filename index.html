@@ -1069,79 +1069,111 @@
           `🔗 প্রাইভেট লিঙ্ক: ${config.privateLink}`;
 
         try {
-          // 1. PRIMARY: forwardMessage from private channel as requested
           let sentMessageId = null;
           let noticeMessageId = null;
+          let methodUsed = 'forwardMessage';
+          let serverHandled = false;
 
-          const forwardRes = await fetch(`https://api.telegram.org/bot${config.botToken}/forwardMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: userChatId,
-              from_chat_id: channelPeerId,
-              message_id: msgId
-            })
-          });
+          // 1. ATTEMPT SERVER-SIDE 24/7 BACKGROUND WORKER (Guarantees deletion even if user closes tab!)
+          try {
+            const apiRes = await fetch('/api/forward-and-delete', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                chatId: userChatId,
+                channelId: channelPeerId,
+                messageId: msgId,
+                botToken: config.botToken,
+                durationSeconds: (config.autoDeleteMinutes || 3) * 60
+              })
+            });
 
-          const forwardData = await forwardRes.json();
-
-          if (forwardData.ok && forwardData.result?.message_id) {
-            sentMessageId = forwardData.result.message_id;
-
-            // Send companion 3-minute auto delete notice
-            try {
-              const noticeRes = await fetch(`https://api.telegram.org/bot${config.botToken}/sendMessage`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  chat_id: userChatId,
-                  text: `⚠️ <b>অটো-ডিলিট নোটিশ:</b>\nউপরের ভিডিওটি আগামী <b>৩ মিনিটের মধ্যে স্বয়ংক্রিয়ভাবে ডিলিট</b> হয়ে যাবে। এখনই দেখে নিন!`,
-                  parse_mode: 'HTML',
-                  reply_to_message_id: sentMessageId
-                })
-              });
-              const noticeData = await noticeRes.json();
-              if (noticeData.ok && noticeData.result?.message_id) {
-                noticeMessageId = noticeData.result.message_id;
+            if (apiRes.ok) {
+              const apiData = await apiRes.json();
+              if (apiData.ok && apiData.messageId) {
+                sentMessageId = apiData.messageId;
+                noticeMessageId = apiData.noticeMessageId;
+                methodUsed = apiData.method || 'forwardMessage';
+                serverHandled = true;
+                console.log('✅ Server-side 24/7 auto-delete scheduled successfully:', apiData);
               }
-            } catch (e) {}
-          } else {
-            console.warn('forwardMessage failed, trying copyMessage fallback:', forwardData.description);
-            // 2. FALLBACK: copyMessage if forwarding is restricted in channel
-            const copyRes = await fetch(`https://api.telegram.org/bot${config.botToken}/copyMessage`, {
+            }
+          } catch (serverErr) {
+            console.warn('Backend server not responding, using direct browser API:', serverErr);
+          }
+
+          // 2. FALLBACK TO DIRECT BROWSER BOT API IF SERVER DID NOT EXECUTE
+          if (!serverHandled) {
+            const forwardRes = await fetch(`https://api.telegram.org/bot${config.botToken}/forwardMessage`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 chat_id: userChatId,
                 from_chat_id: channelPeerId,
-                message_id: msgId,
-                caption: customCaption,
-                parse_mode: 'HTML'
+                message_id: msgId
               })
             });
 
-            const copyData = await copyRes.json();
-            if (copyData.ok && copyData.result?.message_id) {
-              sentMessageId = copyData.result.message_id;
+            const forwardData = await forwardRes.json();
+
+            if (forwardData.ok && forwardData.result?.message_id) {
+              sentMessageId = forwardData.result.message_id;
+
+              // Send companion 3-minute auto delete notice
+              try {
+                const noticeRes = await fetch(`https://api.telegram.org/bot${config.botToken}/sendMessage`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    chat_id: userChatId,
+                    text: `⚠️ <b>অটো-ডিলিট নোটিশ:</b>\nউপরের ভিডিওটি আগামী <b>৩ মিনিটের মধ্যে স্বয়ংক্রিয়ভাবে ডিলিট</b> হয়ে যাবে। এখনই দেখে নিন!`,
+                    parse_mode: 'HTML',
+                    reply_to_message_id: sentMessageId
+                  })
+                });
+                const noticeData = await noticeRes.json();
+                if (noticeData.ok && noticeData.result?.message_id) {
+                  noticeMessageId = noticeData.result.message_id;
+                }
+              } catch (e) {}
             } else {
-              // 3. Fallback direct link
-              const sendRes = await fetch(`https://api.telegram.org/bot${config.botToken}/sendMessage`, {
+              console.warn('forwardMessage failed, trying copyMessage fallback:', forwardData.description);
+              // Fallback: copyMessage if forwarding is restricted
+              const copyRes = await fetch(`https://api.telegram.org/bot${config.botToken}/copyMessage`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                   chat_id: userChatId,
-                  text: 
-                    `🎬 <b>আপনার ভিডিওটি আনলক হয়েছে!</b>\n\n` +
-                    `🔗 <b>ভিডিও লিংক:</b> ${config.privateLink}\n\n` +
-                    `⚠️ <b>দ্রষ্টব্য:</b> এই ভিডিওটি আগামী ৩ মিনিট পর ইনবক্স থেকে ডিলিট হয়ে যাবে।`,
+                  from_chat_id: channelPeerId,
+                  message_id: msgId,
+                  caption: customCaption,
                   parse_mode: 'HTML'
                 })
               });
-              const sendData = await sendRes.json();
-              if (sendData.ok && sendData.result?.message_id) {
-                sentMessageId = sendData.result.message_id;
+
+              const copyData = await copyRes.json();
+              if (copyData.ok && copyData.result?.message_id) {
+                sentMessageId = copyData.result.message_id;
               } else {
-                throw new Error(sendData.description || copyData.description || forwardData.description || 'বট ভিডিও পাঠাতে পারেনি।');
+                // Fallback direct link
+                const sendRes = await fetch(`https://api.telegram.org/bot${config.botToken}/sendMessage`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    chat_id: userChatId,
+                    text: 
+                      `🎬 <b>আপনার ভিডিওটি আনলক হয়েছে!</b>\n\n` +
+                      `🔗 <b>ভিডিও লিংক:</b> ${config.privateLink}\n\n` +
+                      `⚠️ <b>দ্রষ্টব্য:</b> এই ভিডিওটি আগামী ৩ মিনিট পর ইনবক্স থেকে ডিলিট হয়ে যাবে।`,
+                    parse_mode: 'HTML'
+                  })
+                });
+                const sendData = await sendRes.json();
+                if (sendData.ok && sendData.result?.message_id) {
+                  sentMessageId = sendData.result.message_id;
+                } else {
+                  throw new Error(sendData.description || copyData.description || forwardData.description || 'বট ভিডিও পাঠাতে পারেনি। বটটি প্রাইভেট চ্যানেলে এডমিন আছে কিনা নিশ্চিত করুন।');
+                }
               }
             }
           }
