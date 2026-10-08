@@ -1069,43 +1069,80 @@
           `🔗 প্রাইভেট লিঙ্ক: ${config.privateLink}`;
 
         try {
-          // Attempt copyMessage from private channel
-          const copyRes = await fetch(`https://api.telegram.org/bot${config.botToken}/copyMessage`, {
+          // 1. PRIMARY: forwardMessage from private channel as requested
+          let sentMessageId = null;
+          let noticeMessageId = null;
+
+          const forwardRes = await fetch(`https://api.telegram.org/bot${config.botToken}/forwardMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               chat_id: userChatId,
               from_chat_id: channelPeerId,
-              message_id: msgId,
-              caption: customCaption,
-              parse_mode: 'HTML'
+              message_id: msgId
             })
           });
 
-          const copyData = await copyRes.json();
-          let sentMessageId = null;
+          const forwardData = await forwardRes.json();
 
-          if (copyData.ok && copyData.result?.message_id) {
-            sentMessageId = copyData.result.message_id;
+          if (forwardData.ok && forwardData.result?.message_id) {
+            sentMessageId = forwardData.result.message_id;
+
+            // Send companion 3-minute auto delete notice
+            try {
+              const noticeRes = await fetch(`https://api.telegram.org/bot${config.botToken}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: userChatId,
+                  text: `⚠️ <b>অটো-ডিলিট নোটিশ:</b>\nউপরের ভিডিওটি আগামী <b>৩ মিনিটের মধ্যে স্বয়ংক্রিয়ভাবে ডিলিট</b> হয়ে যাবে। এখনই দেখে নিন!`,
+                  parse_mode: 'HTML',
+                  reply_to_message_id: sentMessageId
+                })
+              });
+              const noticeData = await noticeRes.json();
+              if (noticeData.ok && noticeData.result?.message_id) {
+                noticeMessageId = noticeData.result.message_id;
+              }
+            } catch (e) {}
           } else {
-            // Fallback: sendMessage with inline link
-            const sendRes = await fetch(`https://api.telegram.org/bot${config.botToken}/sendMessage`, {
+            console.warn('forwardMessage failed, trying copyMessage fallback:', forwardData.description);
+            // 2. FALLBACK: copyMessage if forwarding is restricted in channel
+            const copyRes = await fetch(`https://api.telegram.org/bot${config.botToken}/copyMessage`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 chat_id: userChatId,
-                text: 
-                  `🎬 <b>আপনার ভিডিওটি আনলক হয়েছে!</b>\n\n` +
-                  `🔗 <b>ভিডিও লিংক:</b> ${config.privateLink}\n\n` +
-                  `⚠️ <b>দ্রষ্টব্য:</b> এই ভিডিওটি আগামী ৩ মিনিট পর ইনবক্স থেকে ডিলিট হয়ে যাবে।`,
+                from_chat_id: channelPeerId,
+                message_id: msgId,
+                caption: customCaption,
                 parse_mode: 'HTML'
               })
             });
-            const sendData = await sendRes.json();
-            if (sendData.ok && sendData.result?.message_id) {
-              sentMessageId = sendData.result.message_id;
+
+            const copyData = await copyRes.json();
+            if (copyData.ok && copyData.result?.message_id) {
+              sentMessageId = copyData.result.message_id;
             } else {
-              throw new Error(sendData.description || copyData.description || 'বট মেসেজ পাঠাতে পারেনি।');
+              // 3. Fallback direct link
+              const sendRes = await fetch(`https://api.telegram.org/bot${config.botToken}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  chat_id: userChatId,
+                  text: 
+                    `🎬 <b>আপনার ভিডিওটি আনলক হয়েছে!</b>\n\n` +
+                    `🔗 <b>ভিডিও লিংক:</b> ${config.privateLink}\n\n` +
+                    `⚠️ <b>দ্রষ্টব্য:</b> এই ভিডিওটি আগামী ৩ মিনিট পর ইনবক্স থেকে ডিলিট হয়ে যাবে।`,
+                  parse_mode: 'HTML'
+                })
+              });
+              const sendData = await sendRes.json();
+              if (sendData.ok && sendData.result?.message_id) {
+                sentMessageId = sendData.result.message_id;
+              } else {
+                throw new Error(sendData.description || copyData.description || forwardData.description || 'বট ভিডিও পাঠাতে পারেনি।');
+              }
             }
           }
 
@@ -1123,6 +1160,7 @@
             chatId: userChatId,
             userName: currentUser.first_name,
             messageId: sentMessageId,
+            noticeMessageId: noticeMessageId,
             sentAt: now,
             deleteAt: deleteAt,
             isDeleted: false
@@ -1143,7 +1181,7 @@
           } catch (e) {}
 
           // Start 3-minute Countdown Timer
-          startAutoDeleteCountdown(deleteAt, sentMessageId, userChatId);
+          startAutoDeleteCountdown(deleteAt, sentMessageId, userChatId, noticeMessageId);
 
         } catch (err) {
           deliveryLoadingView.classList.add('hidden');
@@ -1152,7 +1190,7 @@
         }
       }
 
-      function startAutoDeleteCountdown(deleteAt, messageId, chatId) {
+      function startAutoDeleteCountdown(deleteAt, messageId, chatId, noticeMessageId) {
         if (deliveryCountdownInterval) clearInterval(deliveryCountdownInterval);
 
         deliveryCountdownInterval = setInterval(() => {
@@ -1160,7 +1198,7 @@
           if (remainingMs <= 0) {
             clearInterval(deliveryCountdownInterval);
             countdownTimerValue.textContent = 'সময় শেষ! ডিলিট করা হচ্ছে...';
-            executeMessageDelete(chatId, messageId);
+            executeMessageDelete(chatId, messageId, noticeMessageId);
           } else {
             const totalSec = Math.floor(remainingMs / 1000);
             const m = Math.floor(totalSec / 60);
@@ -1170,7 +1208,7 @@
         }, 1000);
       }
 
-      async function executeMessageDelete(chatId, messageId) {
+      async function executeMessageDelete(chatId, messageId, noticeMessageId) {
         if (!messageId) return;
         try {
           const res = await fetch(`https://api.telegram.org/bot${config.botToken}/deleteMessage`, {
@@ -1184,12 +1222,22 @@
             countdownTimerValue.textContent = 'মুছে ফেলা হয়েছে';
             if (currentDeliveryRecord) currentDeliveryRecord.isDeleted = true;
           }
+
+          // Also delete companion notice message if present
+          const noticeIdToDelete = noticeMessageId || (currentDeliveryRecord ? currentDeliveryRecord.noticeMessageId : null);
+          if (noticeIdToDelete) {
+            fetch(`https://api.telegram.org/bot${config.botToken}/deleteMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: chatId, message_id: noticeIdToDelete })
+            }).catch(() => {});
+          }
         } catch (e) {}
       }
 
       btnInstantTestDelete.addEventListener('click', () => {
         if (currentDeliveryRecord && currentDeliveryRecord.messageId) {
-          executeMessageDelete(currentDeliveryRecord.chatId, currentDeliveryRecord.messageId);
+          executeMessageDelete(currentDeliveryRecord.chatId, currentDeliveryRecord.messageId, currentDeliveryRecord.noticeMessageId);
         }
       });
 
